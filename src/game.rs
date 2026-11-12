@@ -127,6 +127,8 @@ pub struct Game {
     pub pieces: u32,
     pub tetrises: u32,
     pub last_clear: u32,
+    pub cleared_rows: [usize; 4],
+    pub cleared_cells: [Row; 4],
     pub game_over: bool,
     rng: Rng,
     bag: Vec<PieceKind>
@@ -153,6 +155,8 @@ impl Game {
             pieces: 0,
             tetrises: 0,
             last_clear: 0,
+            cleared_rows: [0; 4],
+            cleared_cells: [[0; WIDTH]; 4],
             game_over: false,
             rng: Rng::new(seed),
             bag: Vec::with_capacity(7),
@@ -305,10 +309,15 @@ impl Game {
 
         let mut kept = [[0u8; WIDTH]; HEIGHT];
         let mut dst = HEIGHT;
-        for row in self.board.iter().rev() {
+        let mut n_full = 0;
+        for (r, row) in self.board.iter().enumerate().rev() {
             if row.contains(&0) {
                 dst -= 1;
                 kept[dst] = *row;
+            } else {
+                self.cleared_rows[n_full] = r;
+                self.cleared_cells[n_full] = *row;
+                n_full += 1;
             }
         }
         let n = dst as u32;
@@ -549,5 +558,24 @@ mod tests {
         assert!((slow - 1.0).abs() < 1e-6);
         g.level = 10;
         assert!(g.gravity_interval() < slow);
+    }
+
+    #[test]
+    fn remembers_which_rows_were_cleared() {
+        let mut g = Game::new(0);
+
+        fill_row(&mut g, HEIGHT - 3, &[0]);
+        fill_row(&mut g, HEIGHT - 2, &[0, 5]);
+        fill_row(&mut g, HEIGHT - 1, &[0]);
+        g.current = Piece {
+            kind: PieceKind::I,
+            rot: 1,
+            x: -2,
+            y: 0,
+        };
+        assert_eq!(g.hard_drop(), 2);
+        assert_eq!(&g.cleared_rows[..2], &[HEIGHT - 1, HEIGHT - 3]);
+        assert!(g.cleared_cells[0].iter().all(|&v| v != 0));
+        assert_eq!(g.cleared_cells[0][0], PieceKind::I.id());
     }
 }
