@@ -393,7 +393,6 @@ fn draw(a: &mut Ascii, f: &Frame) {
                 if off > ring.thickness * CELL_ASPECT {
                     continue;
                 }
-                // draw the ring with characters that follow its curve
                 let tangent = fy.atan2(fx_).to_degrees() + 90.0;
                 let a180 = tangent.rem_euclid(180.0);
                 let ch = match a180 {
