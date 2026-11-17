@@ -1,0 +1,14 @@
+# Rustris AI weights, written by `cargo run --release --example train`.
+# generation 25: elite average 396000 points per 500-piece game
+# (look-ahead true, 60 candidates x 5 games, seed 2026).
+landing_height -8.366086
+eroded_cells -3.2417119
+row_transitions 0.26472807
+col_transitions -29.733606
+holes -25.92341
+wells -0.17188944
+rows_with_holes -11.753739
+bumpiness -2.7440255
+tetrises 4.394542
+small_clears -24.063143
+danger -7.952551

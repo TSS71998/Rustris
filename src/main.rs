@@ -3,6 +3,7 @@ mod ascii;
 use macroquad::prelude::*;
 
 use ascii::Ascii;
+use rustris::ai::{Ai, Pilot};
 use rustris::bigfont;
 use rustris::effects::{BoardGeom, CELL_ASPECT, Effects, Label, Rgb, piece_rgb};
 use rustris::game::{Game, HEIGHT, PieceKind, WIDTH};
@@ -209,15 +210,35 @@ const HELP: &[(&str, &str)] = &[
     ("R", "restart"),
     ("V", "visual mode"),
     ("1-4", "preview fx"),
+    ("A", "AI on/off"),
+    ("S", "AI speed"),
     #[cfg(not(target_arch = "wasm32"))]
     ("ESC", "quit"),
 ];
+
+const AI_SPEEDS: [(&str, f32); 3] = [("normal", 0.06), ("fast", 0.015), ("max", 0.0)];
 
 struct Frame<'a> {
     player: &'a Player,
     fx: &'a Effects,
     time: f32,
-    over_for: Option<f32>
+    over_for: Option<f32>,
+    ai: Option<&'static str>
+}
+
+fn apply(player: &mut Player, fx: &mut Effects, action: Action) {
+    let game = &player.game;
+    let active = !player.paused && game.game_over;
+    let drop = (action == Action::HardDrop && active).then(|| {
+        let p = game.current;
+        let dist = game.ghost_y() - p.y;
+        let cells: Vec<_> = p.cells().iter().map(|&(r, c)| (r + dist, c)).collect();
+        (cells, dist, piece_rgb(p.kind.id()))
+    });
+    player.act(action);
+    if let Some((cells, dist, rgb)) = drop  {
+        fx.hard_drop(&cells, dist, rgb);
+    }
 }
 
 fn draw(a: &mut Ascii, f: &Frame) {
@@ -344,6 +365,13 @@ fn draw(a: &mut Ascii, f: &Frame) {
         ascii::Mode::Raw => "raw",
     };
     a.text(rx, by1 - 2, &format!("view: {mode}"), DIM);
+    match f.ai {
+        Some(speed) => {
+            let pulse = 0.75 + 0.25 * (f.time * 4.0).sin();
+            a.text(rx, by1 - 4, &format!("AI playing ({speed})"), scale([0.55, 1.0, 0.7], pulse));
+        }
+        None => a.text(rx, by1 - 4, "AI: off  (press A)", DIM),
+    }
 
     banner(
         a,
@@ -509,6 +537,8 @@ async fn main() {
     let mut fx = Effects::new(geom(), new_seed() ^ 0x5eed);
     let mut over_for: Option<f32> = None;
     let mut time = 0.0f32;
+    let mut pilot: Option<Pilot> = None;
+    let mut ai_speed = 0;
 
     loop {
         #[cfg(not(target_arch = "wasm32"))]
@@ -519,7 +549,22 @@ async fn main() {
             player = Player::new(new_seed());
             fx.clear();
             over_for = None;
+            if pilot.is_some() {
+                pilot = Some(Pilot::new(Ai::default(), AI_SPEEDS[ai_speed].1));
+            }
         }
+        if is_key_pressed(KeyCode::A) {
+            pilot = match pilot {
+                Some(_) => None,
+                None => Some(Pilot::new(Ai::default(), AI_SPEEDS[ai_speed].1)),
+            };
+        }
+        if is_key_pressed(KeyCode::S) {
+            ai_speed = (ai_speed + 1) % AI_SPEEDS.len();
+            if let Some(p) = pilot.as_mut() {
+                p.step = AI_SPEEDS[ai_speed].1;
+            }
+         }
         if is_key_pressed(KeyCode::P) {
             player.toggle_pause();
         }
@@ -556,30 +601,23 @@ async fn main() {
             (KeyCode::RightShift, Action::Hold),
         ];
 
-        for (key, action) in presses {
-            if is_key_pressed(key) {
-                let game = &player.game;
-                let active = !player.paused && !game.game_over;
-                // remember where a hard-dropped piece starts and lands
-                let drop = (action == Action::HardDrop && active).then(|| {
-                    let p = game.current;
-                    let dist = game.ghost_y() - p.y;
-                    let cells: Vec<_> = p.cells().iter().map(|&(r, c)| (r + dist, c)).collect();
-                    (cells, dist, piece_rgb(p.kind.id()))
-                });
-                player.act(action);
-                if let Some((cells, dist, rgb)) = drop {
-                    fx.hard_drop(&cells, dist, rgb);
+        let dt = get_frame_time().min(0.1);
+        let keys = if let Some(p) = pilot.as_mut() {
+            p.update(&mut player, dt, |pl, action| apply(pl, &mut fx, action));
+            HeldKeys::default()
+        } else {
+            for (key, action) in presses {
+                if is_key_pressed(key) {
+                    apply(&mut player, &mut fx, action);
                 }
             }
-        }
-
-        let keys = HeldKeys {
-            left: is_key_down(KeyCode::Left),
-            right: is_key_down(KeyCode::Right),
-            soft_drop: is_key_down(KeyCode::Down),
+            HeldKeys {
+                left: is_key_down(KeyCode::Left),
+                right: is_key_down(KeyCode::Right),
+                soft_drop: is_key_down(KeyCode::Down),
+            }
         };
-        let dt = get_frame_time().min(0.1);
+        
         player.update(dt, keys);
 
         let game = &player.game;
@@ -609,7 +647,8 @@ async fn main() {
                 player: &player,
                 fx: &fx,
                 time,
-                over_for
+                over_for,
+                ai: pilot.as_ref().map(|_| AI_SPEEDS[ai_speed].0)
             }
         );
         next_frame().await;

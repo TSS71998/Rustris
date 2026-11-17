@@ -10,7 +10,10 @@ pub enum Action {
     RotateCw,
     RotateCcw,
     HardDrop,
-    Hold
+    Hold,
+    /// One column left/right (used by the AI; humans hold arrow keys).
+    ShiftLeft,
+    ShiftRight
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,6 +126,16 @@ impl Player {
             Action::Hold => {
                 if self.game.hold() {
                     self.new_piece();
+                }
+            }
+            Action::ShiftLeft => {
+                if self.game.shift(-1) {
+                    self.moved();
+                }
+            }
+            Action::ShiftRight => {
+                if self.game.shift(1) {
+                    self.moved();
                 }
             }
         }
