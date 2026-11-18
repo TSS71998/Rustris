@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use crate::game::{Game, HEIGHT, PieceKind, WIDTH};
 use crate::player::{Action, Player};
+use crate::rng::Rng;
 
 const FULL: u16 = (1 << WIDTH) - 1;
 
@@ -319,9 +320,8 @@ impl Ai {
         }
     }
 
-    fn search(&self, rows: &Rows, kind: PieceKind, next: Option<PieceKind>) -> Option<(f32, u8, i32)> {
+    fn search(&self, rows: &Rows, kind: PieceKind, next: Option<PieceKind>, hold: bool, out: &mut Vec<(f32, Move)>) {
         let w = &self.weights;
-        let mut best: Option<(f32, u8, i32)> = None;
         placements(rows, kind, |p| {
             let score = match next {
                 None => w.dot(&p.features),
@@ -333,39 +333,84 @@ impl Ai {
                     w.dot_step(&p.features) + if best2.is_finite() { best2 } else { -1e9 }
                 }
             };
-            if best.is_none_or(|(s, _, _)| score > s) {
-                best = Some((score, p.rot, p.x));
-            }
+            out.push((score, Move { hold, rot: p.rot, x: p.x}));
         });
-        best
     }
 
-    pub fn plan(&self, game: &Game) -> Option<Move> {
+    pub fn rank(&self, game: &Game) -> Vec<(f32, Move)> {
+        let mut moves = Vec::new();
         if game.game_over {
-            return None;
+            return moves;
         }
         let rows = board_rows(game);
         let queue = |i: usize| game.queue.get(i).copied();
         let look = |n: Option<PieceKind>| if self.lookahead { n } else { None };
 
-        let mut best = self
-            .search(&rows, game.current.kind, look(queue(0)))
-            .map(|(s, rot, x)| (s, Move { hold: false, rot, x}));
+        self.search(&rows, game.current.kind, look(queue(0)), false, &mut moves);
         if self.use_hold && !game.hold_used {
             let (piece, next) = match game.hold {
                 Some(h) => (Some(h), queue(0)),
                 None => (queue(0), queue(1)),
             };
-            let swap = piece
-                .filter(|&p| p != game.current.kind)
-                .and_then(|p| self.search(&rows, p, look(next)));
-            if let Some((s, rot, x)) = swap
-                && best.is_none_or(|(b, _)| s > b)
-            {
-                best = Some((s, Move { hold: true, rot, x }));
+            if let Some(p) = piece.filter(|&p| p != game.current.kind) {
+                self.search(&rows, p, look(next), true, &mut moves);
             }
         }
-        best.map(|(_, m)| m)
+        moves.sort_by(|a, b| b.0.total_cmp(&a.0));
+        moves
+    }
+
+    pub fn plan(&self, game: &Game) -> Option<Move> {
+        self.rank(game).first().map(|&(_, m)| m)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Difficulty {
+    Easy,
+    Normal,
+    Hard,
+    Pain
+}
+
+impl Difficulty {
+    pub const ALL: [Difficulty; 4] = [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard, Difficulty::Pain];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Difficulty::Easy => "EASY",
+            Difficulty::Normal => "NORMAL",
+            Difficulty::Hard => "HARD",
+            Difficulty::Pain => "PAIN"
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Difficulty::Easy => "about 0.7 pieces/s, no look-ahead, makes mistakes",
+            Difficulty::Normal => "about 1.2 pieces/s, uses hold, sometimes slips up",
+            Difficulty::Hard => "about 2 pieces/s, plans with the next piece",
+            Difficulty::Pain => "about 3 pieces/s, full search, no mistakes",
+        }
+    }
+
+    pub fn pilot(self, seed: u64) -> Pilot {
+        let (step, think, lookahead, use_hold, blunder) = match self {
+            Difficulty::Easy => (0.16, 0.75, false, false, 0.15),
+            Difficulty::Normal => (0.10, 0.38, false, true, 0.06),
+            Difficulty::Hard => (0.065, 0.16, true, true, 0.02),
+            Difficulty::Pain => (0.045, 0.06, true, true, 0.0),
+        };
+        let ai = Ai {
+            lookahead,
+            use_hold,
+            ..Ai::default()
+        };
+        let mut pilot = Pilot::new(ai, step);
+        pilot.think = think;
+        pilot.blunder = blunder;
+        pilot.rng = Rng::new(seed);
+        pilot
     }
 }
 
@@ -389,6 +434,9 @@ pub fn play_game(ai: &Ai, seed: u64, max_pieces: u32) -> Game {
 pub struct Pilot {
     pub ai: Ai,
     pub step: f32,
+    pub think: f32,
+    pub blunder: f32,
+    rng: Rng,
     plan: Option<Move>,
     plan_for: Option<(u32, bool)>,
     timer: f32,
@@ -400,11 +448,23 @@ impl Pilot {
         Pilot {
             ai,
             step,
+            think: 0.0,
+            blunder: 0.0,
+            rng: Rng::new(1),
             plan: None,
             plan_for: None,
             timer: 0.0,
             actions: 0
         }
+    }
+
+    fn choose(&mut self, game: &Game) -> Option<Move> {
+        let ranked = self.ai.rank(game);
+        if ranked.len() > 1 && self.rng.f32() < self.blunder {
+            let i = 1 + self.rng.below((ranked.len() - 1).min(5));
+            return Some(ranked[i].1);
+        }
+        ranked.first().map(|&(_, m)| m)
     }
 
     fn next_action(&self, game: &Game) -> Action {
@@ -449,9 +509,12 @@ impl Pilot {
             }
             let key = (game.pieces, game.hold_used);
             if self.plan_for != Some(key) {
-                self.plan = self.ai.plan(game);
+                self.plan = self.choose(game);
                 self.plan_for = Some(key);
                 self.actions = 0;
+                if self.think > 0.0 && !rush {
+                    self.timer = self.timer.min(0.0) - self.think;
+                }
             }
             let action = self.next_action(game);
             if action == Action::HardDrop && dropped {

@@ -8,6 +8,8 @@ pub const HEIGHT: usize = 20;
 pub type Row = [u8; WIDTH];
 pub type Board = [Row; HEIGHT];
 
+pub const GARBAGE: u8 = 8;
+
 pub const LINE_SCORES: [u32; 5] = [0, 100, 300, 500, 800];
 
 const KICKS: [(i32, i32); 8] = [
@@ -282,6 +284,36 @@ impl Game {
         self.score += 2 * (y - self.current.y) as u32;
         self.current.y = y;
         self.lock()
+    }
+
+    pub fn add_garbage(&mut self, n: usize, hole: usize) {
+        let n = n.min(HEIGHT);
+        if n == 0 || self.game_over {
+            return;
+        }
+        if self.board[..n].iter().any(|row| row.iter().any(|&v| v != 0)) {
+            self.game_over = true;
+        }
+        self.board.copy_within(n.., 0);
+        let mut row = [GARBAGE; WIDTH];
+        row[hole.min(WIDTH - 1)] = 0;
+        for r in HEIGHT - n..HEIGHT {
+            self.board[r] = row;
+        }
+
+        for _ in 0..n {
+            if self.piece_fits(self.current) {
+                break;
+            }
+            self.current.y -= 1;
+        }
+        if !self.piece_fits(self.current) {
+            self.game_over = true;
+        }
+    }
+
+    pub fn board_empty(&self) -> bool {
+        self.board.iter().all(|row| row.iter().all(|&v| v == 0))
     }
 
     pub fn hold(&mut self) -> bool {
@@ -577,5 +609,37 @@ mod tests {
         assert_eq!(&g.cleared_rows[..2], &[HEIGHT - 1, HEIGHT - 3]);
         assert!(g.cleared_cells[0].iter().all(|&v| v != 0));
         assert_eq!(g.cleared_cells[0][0], PieceKind::I.id());
+    }
+
+    #[test]
+    fn garbage_pushes_the_stack_up() {
+        let mut g = Game::new(0);
+        g.board[HEIGHT - 1][3] = 5;
+        g.add_garbage(2, 7);
+        assert_eq!(g.board[HEIGHT - 3][3], 5, "old stack moved up two rows");
+        for r in HEIGHT - 2..HEIGHT {
+            assert_eq!(g.board[r][7], 0, "hole stays open");
+            assert_eq!(g.board[r].iter().filter(|&&v| v == GARBAGE).count(), WIDTH - 1);
+        }
+        assert!(!g.game_over);
+        assert!(!g.board_empty());
+    }
+
+    #[test]
+    fn garbage_can_top_you_out() {
+        let mut g = Game::new(0);
+        g.board[0][0] = 1; // stack already touching the ceiling
+        g.add_garbage(1, 0);
+        assert!(g.game_over);
+    }
+
+    #[test]
+    fn garbage_lifts_the_falling_piece() {
+        let mut g = Game::new(0);
+        while g.gravity_step() {} // piece resting on the floor
+        let y = g.current.y;
+        g.add_garbage(3, 0);
+        assert!(!g.game_over);
+        assert_eq!(g.current.y, y - 3);
     }
 }

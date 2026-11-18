@@ -6,7 +6,7 @@ pub type Rgb = [f32; 3];
 
 pub const CELL_ASPECT: f32 = 10.0 / 6.0;
 
-pub const PALETTE: [Rgb; 8] = [
+pub const PALETTE: [Rgb; 9] = [
     [0.0, 0.0, 0.0],
     [0.36, 0.86, 0.86], // I
     [0.96, 0.82, 0.40], // O
@@ -15,10 +15,11 @@ pub const PALETTE: [Rgb; 8] = [
     [0.96, 0.44, 0.44], // Z
     [0.44, 0.60, 0.98], // J
     [0.98, 0.62, 0.32], // L
+    [0.50, 0.53, 0.56]  // garbage
 ];
 
 pub fn piece_rgb(id: u8) -> Rgb {
-    PALETTE[(id as usize).min(7)]
+    PALETTE[(id as usize).min(PALETTE.len() - 1)]
 }
 
 const WHITE: Rgb = [1.0, 1.0, 1.0];
@@ -234,6 +235,34 @@ pub const CLEAR_NAMES: [&str; 5] = ["", "SINGLE", "DOUBLE", "TRIPLE", "TETRIS"];
 
 const MAX_PARTICLES: usize = 8000;
 
+#[derive(Debug, Clone)]
+pub struct Comet {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    pub age: f32,
+    pub life: f32,
+    pub lines: u32,
+    pub color: Rgb
+}
+
+impl Comet {
+    pub fn at(&self, t: f32) -> (f32, f32) {
+        let t = t.clamp(0.0, 1.0);
+        let (x0, y0) = self.from;
+        let (x1, y1) = self.to;
+        let (cx, cy) = ((x0 + x1) / 2.0, y0.min(y1) - 18.0);
+        let u = 1.0 - t;
+        (
+            u * u * x0 + 2.0 * u * t * cx + t * t * x1,
+            u * u * y0 + 2.0 * u * t * cy + t * t * y1,
+        )
+    }
+
+    pub fn t(&self) -> f32 {
+        (self.age / self.life).clamp(0.0, 1.0)
+    }
+}
+
 pub struct Effects {
     pub geom: BoardGeom,
     pub particles: Vec<Particle>,
@@ -241,6 +270,7 @@ pub struct Effects {
     pub sweeps: Vec<Sweep>,
     pub labels: Vec<Label>,
     pub flashes: Vec<Flash>,
+    pub comets: Vec<Comet>,
     pub shake: f32,
     pub flash: f32,
     streams: Vec<Stream>,
@@ -257,6 +287,7 @@ impl Effects {
             sweeps: Vec::new(),
             labels: Vec::new(),
             flashes: Vec::new(),
+            comets: Vec::new(),
             shake: 0.0,
             flash: 0.0,
             streams: Vec::new(),
@@ -272,6 +303,7 @@ impl Effects {
             && self.labels.is_empty()
             && self.flashes.is_empty()
             && self.streams.is_empty()
+            && self.comets.is_empty()
             && self.shake == 0.0
             && self.flash == 0.0
     }
@@ -285,6 +317,35 @@ impl Effects {
         if self.particles.len() < MAX_PARTICLES {
             self.particles.push(p);
         }
+    }
+
+    pub fn comet(&mut self, from: (f32, f32), to: (f32, f32), lines: u32, color: Rgb) {
+        self.comets.push(Comet {
+            from,
+            to,
+            age: 0.0,
+            life: 0.5,
+            lines,
+            color
+        });
+    }
+
+    pub fn garbage_in(&mut self, lines: u32) {
+        let g = self.geom;
+        let n = (lines as usize).min(HEIGHT);
+        for r in HEIGHT - n..HEIGHT {
+            let (x, y) = g.cell_origin(r as f32, 0.0);
+            self.flashes.push(Flash {
+                x,
+                y,
+                w: g.width(),
+                h: g.cell_h,
+                age: 0.0,
+                life: 0.35,
+                color: [0.9, 0.3, 0.3]
+            });
+        }
+        self.shake = self.shake.max(0.1 + 0.05 * n as f32);
     }
 
     pub fn choose_styles(&mut self, n: usize) -> Vec<ClearStyle> {
@@ -723,6 +784,28 @@ impl Effects {
             f.age += dt;
         }
         self.flashes.retain(|f| f.age < f.life);
+
+        let mut sparks = Vec::new();
+        for c in &mut self.comets {
+            c.age += dt;
+            let (x, y) = c.at(c.t());
+            let n = if c.age >= c.life { 18 + 4 * c.lines } else { 1 + c.lines / 2};
+            for _ in 0..n {
+                let mut p = Particle::new(x, y, self.rng.pick(&SPARK_SEQS), c.color, self.rng.range(0.2, 0.5));
+                let a = self.rng.range(0.0, std::f32::consts::TAU);
+                let speed = if c.age >= c.life { self.rng.range(6.0, 20.0) } else { self.rng.range(0.5, 3.0)};
+                p.vx = a.cos() * speed;
+                p.vy = a.sin() * speed / CELL_ASPECT;
+                p.drag = 2.0;
+                p.heat = 0.8;
+                p.glow = 0.5;
+                sparks.push(p);
+            }
+        }
+        self.comets.retain(|c| c.age < c.life);
+        for p in sparks {
+            self.push(p);
+        }
 
         self.shake = (self.shake - dt * 2.0).max(0.0);
         self.flash = (self.flash - dt * 2.5).max(0.0);
